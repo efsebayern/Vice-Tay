@@ -33,9 +33,14 @@ $settings = @{
     VICTORY_NAN_GUARD = 'clamp'
 }
 if ($Machine -eq 'auto') {
-    # Use the existing vendor defaults. The 4070 / 7800X3D profile is explicit.
+    # An NVIDIA card gets the 4090's settings on a PC the size of the 4090 test
+    # PC, the 4070's on one with less than 40 GB of RAM: on an RTX 4080 SUPER
+    # with an i7-13700K and 32 GB, Series S cutscene, 3 minutes each, the 4070
+    # profile ran 16.2 fps with ray tracing where the 4090's ran 10.2, and
+    # 20.3 without where it ran 17.0. Other cards get the 7900 XTX's.
     $cards = @(Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue | ForEach-Object { $_.PNPDeviceID })
-    $Machine = if ($cards -match 'VEN_10DE') { '4090' } else { '7900xtx' }
+    $physical = (Get-CimInstance Win32_ComputerSystem -ErrorAction SilentlyContinue).TotalPhysicalMemory
+    $Machine = if ($cards -notmatch 'VEN_10DE') { '7900xtx' } elseif ($physical -and $physical -lt 40GB) { '4070' } else { '4090' }
 }
 if ($Machine -eq '7900xtx') {
     # i9-12900K, RX 7900 XTX, 64 GB: the page-mapping lock was fastest with one
