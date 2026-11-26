@@ -75,3 +75,37 @@ remains: the patched run reached about 25.6 GB private memory on this 32 GB PC.
 Raw logs for this local test are in the sibling checkout's ignored `target`
 folder: `D:\Games\cool_fox-archive\target\vice-baseline.err.log` and
 `D:\Games\cool_fox-archive\target\vice-4070.err.log`.
+
+## Series S check on an RTX 5070 Ti (2026-11-26)
+
+An RTX 5070 Ti (16 GiB, driver 621.24), Core i5-14600KF, and 32 GiB of system
+RAM ran the Series S profile with 1920×1080 full-screen output. Both runs used
+the same native Windows release executable based on `e1067ca`, the same local
+water-height readback fixes and measurement code, and identical starting copies of
+the checkpoint, translated shaders, and host pipeline library. Pipeline scheduling
+history was disabled in both. The explicit 4070 preset from [#69](https://github.com/TaynanGT/Vice-Tay/pull/69)
+ran first. It changes the worker counts and the GPU buffer and window budgets together.
+
+The stationary sample starts 400 seconds after launch with the camera facing
+the bridge and zero pipelines pending. The open-water sample covers complete
+intervals between 4 and 20 seconds after applying the same forward input at
+480 seconds. FPS uses frames accepted by DXGI divided by elapsed time.
+
+| Metric | Default NVIDIA, stationary | 4070 preset, stationary | Default NVIDIA, open water | 4070 preset, open water |
+|---|---:|---:|---:|---:|
+| Presentations / seconds | 919 / 55.72 | 1,206 / 55.95 | 242 / 15.47 | 289 / 14.40 |
+| Average FPS | 16.49 | **21.56** | 15.65 | **20.07** |
+| Seconds in intervals below 20 FPS | 55.72 | 1.01 | 15.47 | 4.10 |
+| Draws per frame, interval range | 3,530–3,584 | 3,438–3,462 | 3,549–4,029 | 3,521–3,845 |
+| CPU submission preparation, ms/frame | 48.07 | 37.17 | 50.87 | 39.48 |
+| Peak private memory, MiB | 22,300 | 24,083 | 23,038 | 24,146 |
+| Minimum DXGI local budget, MiB | 15,227 | 14,157 | 15,227 | 14,190 |
+| Peak DXGI local usage, MiB | 9,012 | 10,879 | 9,653 | 10,862 |
+| Peak waiting texture slots | 8,372 | 6,823 | 6,694 | 8,382 |
+| Texture attempts deferred for local GPU memory | 0 | 0 | 0 | 0 |
+
+Both runs showed the boat, water reflections, wake, and nearby scenery. With
+the preset, a longer acceleration toward the shore averaged 17.60 FPS over
+33.06 seconds and one interval dropped to 3.51 FPS. The boats reached different
+positions during the longer run. Sustained 20 FPS through shoreline streaming
+and longer-session behavior still need validation.

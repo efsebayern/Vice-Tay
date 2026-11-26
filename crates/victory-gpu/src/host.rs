@@ -6013,7 +6013,7 @@ impl Host {
         }
         batch.fill();
         stage.next("submit: the last refreshes");
-        batch.flush();
+        batch.flush(None);
         crate::watch::ask_once_end();
         #[cfg(feature = "diagnostics")]
         split.part(2);
@@ -7718,7 +7718,7 @@ impl HostList {
                         copies += 1;
                     }
                     batch.fill();
-                    batch.title_written();
+                    batch.title_written(TitleWrite::Copy);
                     crate::port::copied(dst, src, len);
                     // Renderer port #7: into a heap's records, the rounds
                     // asked earlier did not see it.
@@ -7758,7 +7758,7 @@ impl HostList {
                     let free = !touches(air, p.src, p.src + p.len) && !touches(air, p.dst, p.dst + p.len);
                     batch.fill();
                     if free {
-                        batch.title_written();
+                        batch.title_written(TitleWrite::PlacedCopy);
                     }
                     if let Some(bytes) = p.prepare(free) {
                         batch.placed.push((p.shadow.clone(), p.dst, bytes));
@@ -7779,7 +7779,7 @@ impl HostList {
                     #[cfg(feature = "diagnostics")]
                     let started = std::time::Instant::now();
                     if matches!(step, Step::Run(_)) {
-                        batch.title_written();
+                        batch.title_written(TitleWrite::Deferred);
                         // (It may write anywhere, a heap's records too.)
                         crate::port_journal::prep_wrote();
                     }
@@ -7902,6 +7902,18 @@ static SPLIT: [std::sync::atomic::AtomicU64; 16] = [const { std::sync::atomic::A
 #[cfg(feature = "diagnostics")]
 static FLUSHES: [std::sync::atomic::AtomicU64; 4] = [const { std::sync::atomic::AtomicU64::new(0) }; 4];
 
+/// The list step that needs to see pending refreshes completed.
+enum TitleWrite {
+    Copy,
+    PlacedCopy,
+    Deferred,
+}
+
+/// Nonempty refresh flushes before each kind of title write, and their nanoseconds.
+#[cfg(feature = "diagnostics")]
+static TITLE_WRITE_FLUSHES: [[std::sync::atomic::AtomicU64; 2]; 3] =
+    [const { [const { std::sync::atomic::AtomicU64::new(0) }; 2] }; 3];
+
 /// Counts into [`SPLIT`].
 #[cfg(feature = "diagnostics")]
 struct Split(std::cell::Cell<std::time::Instant>);
@@ -7964,6 +7976,16 @@ fn split_line(frames: f64) {
         e[0],
         e[1] / 1e3,
     );
+    let writes = TITLE_WRITE_FLUSHES.each_ref().map(|[count, nanos]| {
+        (count.swap(0, Ordering::Relaxed) as f64 / frames, nanos.swap(0, Ordering::Relaxed) as f64 / 1e6 / frames)
+    });
+    if writes.iter().any(|&(count, _)| count > 0.0) {
+        let [(copy, copy_ms), (placed, placed_ms), (deferred, deferred_ms)] = writes;
+        tracing::info!(
+            "refresh flushes before title writes per frame: copies {copy:.1} in {copy_ms:.2} ms, placed copies {placed:.1} in \
+             {placed_ms:.2} ms, deferred writes {deferred:.1} in {deferred_ms:.2} ms"
+        );
+    }
     tracing::info!(
         "asking about title memory per frame, all threads: {:.0} kernel askings over {:.0} MB ({:.1} ms, {:.0} pages of 4 KiB found \
          written, {:.0} askings refused); {:.0} questions about holes; view ranges: {:.0} answered by their \
@@ -8535,8 +8557,8 @@ impl Batch {
 
     /// Before a step that writes title memory: pending refreshes are done
     /// first, and textures are checked again after it.
-    fn title_written(&mut self) {
-        self.flush();
+    fn title_written(&mut self, write: TitleWrite) {
+        self.flush(Some(write));
         self.ahead.clear();
         self.textures.clear();
     }
@@ -8780,7 +8802,7 @@ impl Batch {
         PREPARING[2].fetch_sub(summed.saturating_sub(started.elapsed().as_micros() as u64), Ordering::Relaxed);
     }
 
-    fn flush(&mut self) {
+    fn flush(&mut self, _write: Option<TitleWrite>) {
         self.refresh_textures();
         self.index.clear();
         if self.refreshes.is_empty() {
@@ -8792,9 +8814,15 @@ impl Batch {
         self.flush_all();
         #[cfg(feature = "diagnostics")]
         {
-            SPLIT[6].fetch_add(began.elapsed().as_nanos() as u64, Ordering::Relaxed);
+            let nanos = began.elapsed().as_nanos() as u64;
+            SPLIT[6].fetch_add(nanos, Ordering::Relaxed);
             FLUSHES[0].fetch_add(1, Ordering::Relaxed);
             FLUSHES[1].fetch_add(all as u64, Ordering::Relaxed);
+            if let Some(write) = _write {
+                let [count, time] = &TITLE_WRITE_FLUSHES[write as usize];
+                count.fetch_add(1, Ordering::Relaxed);
+                time.fetch_add(nanos, Ordering::Relaxed);
+            }
         }
     }
 
@@ -10799,7 +10827,7 @@ mod refresh_tests {
             for (shadow, at, len) in part {
                 batch.add(shadow, *at, *len);
             }
-            batch.flush();
+            batch.flush(None);
         }
         crate::watch::ask_once_end();
     }
@@ -11355,7 +11383,7 @@ mod refresh_tests {
 
 #[cfg(test)]
 mod batch {   // Batch::texture_due lives here; `mod tests` is already taken at the top of this file
-    use super::{Batch, RamBand, ram_band};
+    use super::{Batch, RamBand, TitleWrite, ram_band};
     use std::sync::Arc;
 
     #[test]
@@ -11427,7 +11455,7 @@ mod batch {   // Batch::texture_due lives here; `mod tests` is already taken at 
         assert!(!batch.texture_due(&a));
         // A copy into title memory or work that may write it may have
         // changed the texture's memory.
-        batch.title_written();
+        batch.title_written(TitleWrite::Copy);
         assert!(batch.texture_due(&a));
         assert!(!batch.texture_due(&a));
         // A fresh submission starts over.

@@ -50,6 +50,12 @@ frame times with a graph, resolution, draws, GPU and CPU with their load, VRAM
 and RAM. **F3** hides it, `-NoPanel` starts without it. Every session is
 recorded to video on the card's encoder.
 
+### Series S gameplay clip
+
+The boat section on the RTX 4090 test PC, with the performance panel visible.
+
+https://github.com/user-attachments/assets/bd07891c-c53f-4f46-9b7e-80463c379b84
+
 ## Tests
 
 Every change goes through the same two steps before it is merged:
