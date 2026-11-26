@@ -400,18 +400,24 @@ pub struct UserData {
 /// a program: with that on for every program, 69 compute programs that
 /// already translated came out changed (`CS_RaytracingResolve`, ...).
 pub fn translate(container: &[u8]) -> Result<HostShader, ShaderError> {
-    match translate_plain(container) {
+    translate_with_wave_wide(container, false)
+}
+
+/// Translates a container with the wave-wide retry enabled for this shader
+/// when allowed. An explicit VICTORY_WAVE_WIDE setting still takes precedence.
+pub fn translate_with_wave_wide(container: &[u8], allow_wide: bool) -> Result<HostShader, ShaderError> {
+    match translate_plain(container, allow_wide) {
         Err(ShaderError::Unsupported { what, .. }) if what == lower::FIRST_HALF => {
-            lower::with_first_half_pairs(|| translate_plain(container))
+            lower::with_first_half_pairs(|| translate_plain(container, allow_wide))
         }
         Err(ShaderError::Unsupported { what, .. }) if what == lower::MASK_ELSEWHERE => {
-            lower::with_mask_ops_on_numbers(|| translate_plain(container))
+            lower::with_mask_ops_on_numbers(|| translate_plain(container, allow_wide))
         }
         other => other,
     }
 }
 
-fn translate_plain(container: &[u8]) -> Result<HostShader, ShaderError> {
+fn translate_plain(container: &[u8], allow_wide: bool) -> Result<HostShader, ShaderError> {
     let c = Container::parse(container)?;
     let dxil = c
         .part(FourCC::DXIL)
@@ -436,7 +442,7 @@ fn translate_plain(container: &[u8]) -> Result<HostShader, ShaderError> {
     let res = resource::track(&p, &native.layout, native.stage, st.as_ref().ok())?;
     let io = io::raise(&p, &native)?;
     let st = st?;
-    emit(&c, &native, &p, &st, &io, &res)
+    emit_with_wave_wide(&c, &native, &p, &st, &io, &res, allow_wide)
 }
 
 /// [`emit`] with the same second tries as [`translate`] (first halves of
@@ -469,6 +475,18 @@ pub fn emit(
     st: &structure::Structured,
     io: &io::Io,
     res: &resource::Resources,
+) -> Result<HostShader, ShaderError> {
+    emit_with_wave_wide(c, native, p, st, io, res, false)
+}
+
+fn emit_with_wave_wide(
+    c: &Container,
+    native: &NativeProgram,
+    p: &ir::Program,
+    st: &structure::Structured,
+    io: &io::Io,
+    res: &resource::Resources,
+    allow_wide: bool,
 ) -> Result<HostShader, ShaderError> {
     // (what an earlier program's lowering on this thread left behind)
     lower::take_needs();
@@ -580,7 +598,7 @@ pub fn emit(
                 [0x58, 0x1d, 0xab, 0x2c, 0xd8, 0xbc, 0xf2, 0x2e, 0x5c, 0x96, 0x4b, 0x98, 0xe9, 0x03, 0x48, 0xd1]
                     | [0x24, 0x31, 0xbb, 0xe7, 0xdc, 0x15, 0x4a, 0xd7, 0x59, 0xd2, 0x0b, 0xc9, 0x54, 0x82, 0x9c, 0x1c]
             );
-        let wide_on = wide_option.as_ref().map_or(scene_kernel, |v| v == "1");
+        let wide_on = wide_option.as_ref().map_or(scene_kernel || allow_wide, |v| v == "1");
         // A single guest wave can iterate an active-lane loop until both host
         // halves have finished. The precise latch and convergence conditions
         // for the driver compute route are checked by widen().
