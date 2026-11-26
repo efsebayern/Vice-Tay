@@ -518,11 +518,13 @@ fn emit_with_wave_wide(
     let exact_only = matches!(&original, Err(ShaderError::Unsupported { what, .. }) if *what == lower::MASK_ELSEWHERE);
     if stuck && native.stage == HwStage::Cs && native.wave64 && lower::host_max_wave() == 32 {
         let why = std::env::var_os("VICTORY_WAVE_WHY").is_some();
+        // The shader's log hash, so lines of programs translated at once stay apart.
+        let named = if why { blake3::hash(c.input).to_hex()[..16].to_owned() } else { String::new() };
         let report = |what: &str, r: &Result<(HostShader, Option<u32>), ShaderError>| {
             if why {
                 match r {
-                    Ok((_, wave)) => eprintln!("WAVE64-RETRY {what}: wave {wave:?}"),
-                    Err(e) => eprintln!("WAVE64-RETRY {what}: {e}"),
+                    Ok((_, wave)) => eprintln!("WAVE64-RETRY {named} {what}: wave {wave:?}"),
+                    Err(e) => eprintln!("WAVE64-RETRY {named} {what}: {e}"),
                 }
             }
         };
