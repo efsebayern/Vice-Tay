@@ -40,7 +40,7 @@ if ($Machine -eq 'auto') {
     # 20.3 without where it ran 17.0. Other cards get the 7900 XTX's.
     $cards = @(Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue | ForEach-Object { $_.PNPDeviceID })
     $physical = (Get-CimInstance Win32_ComputerSystem -ErrorAction SilentlyContinue).TotalPhysicalMemory
-    $Machine = if ($cards -notmatch 'VEN_10DE') { '7900xtx' } elseif ($physical -and $physical -lt 40GB) { '4070' } else { '4090' }
+    $Machine = if (-not ($cards -match 'VEN_10DE')) { '7900xtx' } elseif ($physical -and $physical -lt 40GB) { '4070' } else { '4090' }
 }
 if ($Machine -eq '7900xtx') {
     # i9-12900K, RX 7900 XTX, 64 GB: the page-mapping lock was fastest with one
