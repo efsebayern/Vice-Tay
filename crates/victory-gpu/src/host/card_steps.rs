@@ -1307,7 +1307,7 @@ mod tests {
             let c = host.new_list().unwrap();
             c.defer_copy((start + 1_200_000) as *mut u8, (start + HALF + 100) as *const u8, 1500);
             c.close();
-            let number = host.execute_own(&c);
+            let (number, _) = host.execute_own(&c);
             settle_now(WHY_SYNC);
             assert!(FINISHED.load(Ordering::Acquire) >= number);
             let wanted: Vec<u8> = (0..2000)

@@ -751,6 +751,7 @@ static SYNC_SPLIT: [std::sync::atomic::AtomicU64; 5] = [const { std::sync::atomi
 #[cfg(windows)]
 pub(crate) fn sync_line(frames: f64) {
     crate::port_descriptors::line(frames);
+    crate::draw::in_place_indirect_line(frames);
     let [twins, moved, lost] = [0, 1, 2].map(|i| host::TWINS[i].swap(0, std::sync::atomic::Ordering::Relaxed));
     if twins > 0 {
         tracing::info!(
@@ -2077,8 +2078,19 @@ mod tests {
                 )
             };
             assert!(!host.made(5));
-            sync_heaps();
-            assert!(host.made(5));
+            // Another test's begin_sync_heaps can have the heap-sync thread
+            // running a sync of its own: that one may take this page's write
+            // and make the record a moment after this sync returns.
+            let mut made = false;
+            for _ in 0..200 {
+                sync_heaps();
+                made = host.made(5);
+                if made {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            assert!(made);
         }
         slot::<extern "system" fn(This) -> u32>(h, 0x10)(h);
         // SAFETY: this allocation belongs to the test.

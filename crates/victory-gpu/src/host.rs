@@ -2765,6 +2765,13 @@ struct Sent {
     writes: Vec<(usize, crate::queue::Written, usize)>,
 }
 
+/// The queue fence behind a submission and, if it was sent ahead, the
+/// work to hand to the landing thread while still holding the submit lock.
+struct Submission<'a> {
+    fence: u64,
+    ahead: Option<(std::sync::MutexGuard<'a, u64>, Sent)>,
+}
+
 /// A submission on the card that has not been waited for ([`late`]): its
 /// host lists, taken from the title's (which it may reset meanwhile), and
 /// what is to be done once it has run.
@@ -3991,7 +3998,7 @@ mod late_tests {
         producer.defer_read_back(readback, title.as_mut_ptr(), [16, 2, 32]);
         producer.close();
 
-        let (submitted, sent) = host.submit(&[&producer], &[], true).unwrap();
+        let (submitted, sent) = host.submit(&[&producer], &[], true).ahead.unwrap();
         // SAFETY: the submission lock is held and the event and fence are
         // ours. The test keeps the producer, upload and destination alive.
         unsafe {
@@ -5468,10 +5475,11 @@ impl Host {
 
     /// Runs closed lists and waits for them, and with [`late`] for
     /// everything sent to the card before them, which is settled first.
-    pub(crate) fn execute(&self, runs: &[&HostList]) {
+    /// Returns the queue fence value covering these lists.
+    pub(crate) fn execute(&self, runs: &[&HostList]) -> u64 {
         // Behind what the title's queues were given before it.
         crate::queue::before_sync();
-        let _ = self.submit(runs, &[], false);
+        self.submit(runs, &[], false).fence
     }
 
     /// Runs a closed internal upload-only host list synchronously without
@@ -5521,7 +5529,7 @@ impl Host {
     fn send_late(&self, lists: Vec<crate::list::Detached>, order: Vec<usize>, parts: &[usize]) {
         let sent = {
             let runs: Vec<&HostList> = order.iter().map(|&i| lists[i].host()).collect();
-            self.submit(&runs, parts, true)
+            self.submit(&runs, parts, true).ahead
         };
         let Some((mut submitted, sent)) = sent else {
             // (Not reached: a submission sent ahead always comes back.)
@@ -5578,11 +5586,13 @@ impl Host {
     /// flight ([`late_free_present`]): not waited for, settled with the
     /// others. The caller keeps the list and does not reset it before the
     /// submission whose number comes back has finished ([`FINISHED`]); 0 if
-    /// it ran and was waited for after all.
-    fn execute_own(&self, list: &HostList) -> u64 {
+    /// it ran and was waited for after all. The second value is the queue
+    /// fence covering the list in either case.
+    fn execute_own(&self, list: &HostList) -> (u64, u64) {
         late_threads();
-        let Some((submitted, sent)) = self.submit(&[list], &[], true) else {
-            return 0;
+        let Submission { fence, ahead: flight } = self.submit(&[list], &[], true);
+        let Some((submitted, sent)) = flight else {
+            return (0, fence);
         };
         let number = sent.number;
         {
@@ -5613,7 +5623,7 @@ impl Host {
         LINE_MOVED.notify_one();
         RELAY_MOVED.notify_one();
         drop(submitted);
-        number
+        (number, fence)
     }
 
     /// Waits for the card to run every flight in the air ([`late`]) and
@@ -5817,7 +5827,7 @@ impl Host {
     /// `parts`: the lists of `runs` at which another part begins
     /// ([`joins`]): those go to the queue in calls of their own, one after the
     /// other, as they would have.
-    fn submit<'a>(&'a self, runs: &[&HostList], parts: &[usize], late: bool) -> Option<(std::sync::MutexGuard<'a, u64>, Sent)> {
+    fn submit<'a>(&'a self, runs: &[&HostList], parts: &[usize], late: bool) -> Submission<'a> {
         #[cfg(feature = "diagnostics")]
         let called = std::time::Instant::now();
         #[cfg(feature = "diagnostics")]
@@ -6122,7 +6132,7 @@ impl Host {
                 writes,
             };
             working(was_working);
-            return Some((submitted, sent));
+            return Submission { fence: *submitted, ahead: Some((submitted, sent)) };
         }
         // Diagnostics: each list on its own, timed (`VICTORY_GPU_TIMING`).
         #[cfg(feature = "diagnostics")]
@@ -6202,6 +6212,7 @@ impl Host {
             let _ = (_i, started);
         }
         let _ = &firsts;
+        let fence = *submitted;
         FINISHED.store(this_submission, Ordering::Release);
         bury(this_submission);
         let gpu = prepared.elapsed();
@@ -6283,7 +6294,7 @@ impl Host {
             crate::shadow::relay_fetched(*QUEUE_ORDER.lock().unwrap_or_else(|e| e.into_inner()));
         }
         working(was_working);
-        None
+        Submission { fence, ahead: None }
     }
 
     /// With `VICTORY_D3D12_DRED`: the faulting address and the allocations
@@ -9934,7 +9945,7 @@ impl Host {
                 crate::popwatch::take(&self.device, list, texture)
             };
             #[cfg(feature = "diagnostics")]
-            p.panel.draw(self, copy, &back, (width, height), format);
+            let panel_copy = p.panel.draw(self, copy, &back, (width, height), format);
             #[cfg(not(feature = "diagnostics"))]
             let _ = frame;
             if composed {
@@ -9956,23 +9967,22 @@ impl Host {
                 list.ResourceBarrier(&post);
             }
             copy.close();
-            let flown = match slot {
+            let (flown, fence) = match slot {
                 Some(i) => {
-                    let flown = self.execute_own(copy);
+                    let (flown, fence) = self.execute_own(copy);
                     p.ahead[i].1 = flown;
-                    flown
+                    (flown, fence)
                 }
-                None => {
-                    self.execute(&[copy]);
-                    0
-                }
+                None => (0, self.execute(&[copy])),
             };
+            #[cfg(feature = "diagnostics")]
+            p.panel.submitted(panel_copy, fence);
             #[cfg(feature = "diagnostics")]
             if let Some(taken) = watched {
                 crate::popwatch::sent(taken, flown, frame);
             }
             #[cfg(not(feature = "diagnostics"))]
-            let _ = flown;
+            let _ = (flown, fence);
             #[cfg(feature = "diagnostics")]
             if let Some((buffer, footprint)) = capture {
                 crate::capture::save_read_back(frame, &buffer, &footprint);
@@ -10800,6 +10810,7 @@ mod refresh_tests {
     /// title memory holds.
     #[test]
     fn refreshed_ranges_hold_title_memory() {
+        let _one = crate::watch::one_asking_test();
         // SAFETY (all blocks): title memory and copies of the test's own,
         // written by this thread and, in `Batch::flush`, by the threads that
         // refresh, which are done when it returns.
@@ -10921,6 +10932,7 @@ mod refresh_tests {
     /// `VICTORY_TEST_ROUNDS`, if what is landed is noted before it is in.)
     #[test]
     fn landings_title_writes_and_light_refreshes_at_once() {
+        let _one = crate::watch::one_asking_test();
         use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
         assert!(crate::safecopy::on());
         const LEN: usize = 24 * PAGE;
@@ -11148,6 +11160,7 @@ mod refresh_tests {
     /// is so no more once something wrote it.
     #[test]
     fn unchanged_ranges_are_known() {
+        let _one = crate::watch::one_asking_test();
         for view in [false, true] {
             let region = title(8 * PAGE, view);
             // (A page read for the first time counts as written.)
@@ -11239,6 +11252,7 @@ mod refresh_tests {
     #[test]
     #[ignore]
     fn frame_of_refreshes() {
+        let _one = crate::watch::one_asking_test();
         let mut random = Random(0x9876_5432_1234_5671);
         const EACH: usize = 224 << 10;
         const BIG: usize = 174 << 20;

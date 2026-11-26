@@ -3,10 +3,11 @@
 # -Safe         without the newer, faster ways (the first thing to try when something is wrong)
 # -RayTracing   the title's own ray-traced indirect light: lit interiors, about a third slower
 # -Windowed     a window instead of the whole screen (full screen is the default)
+# -NoPanel      without the performance panel (on by default, F3 hides it while playing)
 # -Console      series-x (the default) or series-s: the console the title takes this PC for
 # -Build        target\diag (the default, the build all measurements are of) or target\release
 # -Machine      auto (the default: by the graphics card), 7900xtx or 4090
-# -More         other settings: -More @{VICTORY_PANEL='1'}
+# -More         other settings: -More @{VICTORY_AMBIENT='1.0'}
 # On a smaller NVIDIA PC, compare the same Series S scene after a fresh start
 # with one override at a time, e.g. -More @{VICTORY_LAND_THREADS='3'} for
 # copy-back work, or -More @{VICTORY_THIN_THREADS='6'} for list translation.
@@ -16,6 +17,7 @@ param(
     [switch]$Safe,
     [switch]$RayTracing,
     [switch]$Windowed,
+    [switch]$NoPanel,
     [ValidateSet('series-x', 'series-s')][string]$Console = 'series-x',
     [ValidateSet('diag', 'release')][string]$Build = 'diag',
     [ValidateSet('auto', '7900xtx', '4090')][string]$Machine = 'auto',
@@ -71,6 +73,9 @@ if ($Safe) {
 if ($RayTracing) { $settings.VICTORY_BVH_BUILDER = '1' }
 # The whole screen, with no frame, as on the console.
 if (-not $Windowed) { $settings.VICTORY_FULLSCREEN = '1' }
+# The performance panel (FPS, frame times, GPU, CPU, VRAM, RAM) in the upper left
+# corner, so clips and screenshots show what the build runs at and on what PC.
+if (-not $NoPanel) { $settings.VICTORY_PANEL = '1' }
 foreach ($k in $More.Keys) { $settings[$k] = $More[$k] }
 
 $ram = (Get-CimInstance Win32_ComputerSystem -ErrorAction SilentlyContinue).TotalPhysicalMemory

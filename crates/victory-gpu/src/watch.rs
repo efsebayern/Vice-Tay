@@ -1032,6 +1032,15 @@ pub(crate) fn once() -> bool {
     *ON.get_or_init(|| std::env::var_os("VICTORY_ASK_ONCE").is_none_or(|v| v != "0"))
 }
 
+/// Tests that go through the submission's one asking ([`ask_once`]) hold
+/// this while they run: the asking is global, so two tests asking at once end
+/// each other's, and a write one of them waits for can be taken by the other.
+#[cfg(test)]
+pub(crate) fn one_asking_test() -> std::sync::MutexGuard<'static, ()> {
+    static ONE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    ONE.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// With [`once`]: asks about `ranges` (everything a submission's lists
 /// refresh) as [`ask_ahead`] does, and lets that asking stand until
 /// [`ask_once_end`].
@@ -5830,6 +5839,7 @@ mod port7_tests {
     /// before asking is told of that write.
     #[test]
     fn no_write_is_lost_with_port_7() {
+        let _one = one_asking_test();
         askers_and_a_submission(1);
         askers_and_a_submission(2);
     }

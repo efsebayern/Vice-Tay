@@ -5856,7 +5856,11 @@ mod tests {
             // SAFETY: a live buffer.
             unsafe { made.GetDesc() }.Width
         };
-        for (off, raw, len) in [(8, true, 128u64), (8, false, 4 * 456)] {
+        // The copy is the 4 MiB window the view lies in. Off 16 bytes, and
+        // off the 456-byte elements counted from the window's start: a view
+        // on them needs no copy of its own (1 page in 57 at 8 bytes in).
+        let off = [8u64, 24, 40].into_iter().find(|o| !((start + o) % (4 << 20)).is_multiple_of(456)).unwrap();
+        for (raw, len) in [(true, 128u64), (false, 4 * 456)] {
             let v = view(start + off, raw);
             assert_eq!(width(&v), len.next_multiple_of(256));
             let (copy, address, bytes) = buffer_copy(&v).unwrap();

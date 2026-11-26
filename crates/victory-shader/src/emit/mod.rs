@@ -467,6 +467,18 @@ pub fn emit_with_retries(
     }
 }
 
+/// A nonempty list scopes the explicit wave64 fallback to shader log hashes.
+fn wave_wide_hash_matches(list: Option<&std::ffi::OsStr>, input: &[u8]) -> bool {
+    let Some(list) = list.filter(|s| !s.is_empty()) else {
+        return true;
+    };
+    let Some(list) = list.to_str() else {
+        return false;
+    };
+    let hash = blake3::hash(input).to_hex();
+    list.split(',').any(|name| name.trim().eq_ignore_ascii_case(&hash[..16]))
+}
+
 /// Emits a program whose earlier stages already ran.
 pub fn emit(
     c: &Container,
@@ -589,6 +601,7 @@ fn emit_with_wave_wide(
         // lost the card in a submission of two programs that had just moved to it
         // (`ptfx_CS_lightAtlas_Sprite` and `_Trail`). The 32-lane programs' form below, which
         // has no barrier, stays on.
+        // A supplied VICTORY_WAVE_WIDE_ONLY scopes the explicit opt-in to those containers.
         let wide_option = std::env::var_os("VICTORY_WAVE_WIDE");
         // Both archived kernels use one logical wave per group and have
         // validated wave32 PSOs on RTX. Explicit policy wins.
@@ -598,7 +611,12 @@ fn emit_with_wave_wide(
                 [0x58, 0x1d, 0xab, 0x2c, 0xd8, 0xbc, 0xf2, 0x2e, 0x5c, 0x96, 0x4b, 0x98, 0xe9, 0x03, 0x48, 0xd1]
                     | [0x24, 0x31, 0xbb, 0xe7, 0xdc, 0x15, 0x4a, 0xd7, 0x59, 0xd2, 0x0b, 0xc9, 0x54, 0x82, 0x9c, 0x1c]
             );
-        let wide_on = wide_option.as_ref().map_or(scene_kernel || allow_wide, |v| v == "1");
+        // Unset: the scene kernels, and the programs VICTORY_WAVE_WIDE_ONLY names
+        // (`allow_wide`). `=1` with a list: only the listed containers.
+        let wide_on = wide_option.as_ref().map_or(scene_kernel || allow_wide, |v| {
+            v == "1"
+                && wave_wide_hash_matches(std::env::var_os("VICTORY_WAVE_WIDE_ONLY").as_deref(), c.input)
+        });
         // A single guest wave can iterate an active-lane loop until both host
         // halves have finished. The precise latch and convergence conditions
         // for the driver compute route are checked by widen().
@@ -1132,6 +1150,21 @@ mod tests {
     use super::bitcode::Attr;
     use super::lower::LOOP_LIMIT;
     use super::parse_loop_limit;
+
+    #[test]
+    fn explicit_wave_wide_list_matches_only_named_containers() {
+        use std::ffi::OsStr;
+
+        let water = b"selected compute container";
+        let other = b"another compute container";
+        let hash = blake3::hash(water).to_hex();
+        let list = format!("invalid, {}", hash[..16].to_ascii_uppercase());
+        assert!(super::wave_wide_hash_matches(Some(OsStr::new(&list)), water));
+        assert!(!super::wave_wide_hash_matches(Some(OsStr::new(&list)), other));
+        assert!(!super::wave_wide_hash_matches(Some(OsStr::new("invalid")), water));
+        assert!(super::wave_wide_hash_matches(None, other));
+        assert!(super::wave_wide_hash_matches(Some(OsStr::new("")), other));
+    }
 
     /// The LLVM text `dxc -dumpbin` prints for a DXIL container, when dxc
     /// is installed.

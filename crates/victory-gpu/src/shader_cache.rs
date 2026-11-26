@@ -135,6 +135,14 @@ fn build() -> [u8; 32] {
             }
             bytes.push(0);
         }
+        // The list affects output only with the explicit global opt-in.
+        if std::env::var_os("VICTORY_WAVE_WIDE").is_some_and(|v| v == "1")
+            && let Some(list) = std::env::var_os("VICTORY_WAVE_WIDE_ONLY").filter(|v| !v.is_empty())
+        {
+            bytes.extend_from_slice(b"VICTORY_WAVE_WIDE_ONLY=");
+            bytes.extend_from_slice(list.as_encoded_bytes());
+            bytes.push(0);
+        }
         // And which clean-up passes ran over the translated code.
         bytes.extend_from_slice(&victory_shader::emit::shader_opt().to_le_bytes());
         // Renderer port 5 (`VICTORY_PORT_CBV=1`): constant buffers read as raw
