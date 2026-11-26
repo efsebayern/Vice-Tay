@@ -28,6 +28,9 @@ $settings = @{
     VICTORY_JOIN_COPIES = '1'; VICTORY_INDIRECT_WINDOW = '1'; VICTORY_RELAY_COPY = '1'; VICTORY_CARD_STEPS = '2'
     VICTORY_TITLE_PRIORITIES = '0'
     VICTORY_SHOW_AFTER = '1'; VICTORY_AMBIENT = '0.8'; VICTORY_D3D12_DRED = 'light'
+    # Colour targets get nothing past the largest half: the sun's disc and its
+    # glints on the water rendered black without it (run rt-clamp, RTX 4080 SUPER).
+    VICTORY_NAN_GUARD = 'clamp'
 }
 if ($Machine -eq 'auto') {
     # An NVIDIA card (PCI vendor 10DE) gets the 4090's settings, any other the 7900 XTX's.
