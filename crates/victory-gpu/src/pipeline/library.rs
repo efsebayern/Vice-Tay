@@ -515,6 +515,11 @@ fn open(device: &ID3D12Device1, blob: Blob) -> Option<Library> {
     })
 }
 
+#[cfg(test)]
+pub(super) fn empty_test_library(device: &ID3D12Device1) -> Option<ID3D12PipelineLibrary1> {
+    open(device, Blob::None).map(|opened| opened.library)
+}
+
 /// A pipeline's name in the library: the hash of what its host
 /// description holds.
 pub(crate) fn name(kind: &str, root: &[u8], code: &[&[u8]], state: &str) -> String {

@@ -84,12 +84,19 @@ fn typed_slots<'a>(
         })
 }
 
-pub(super) fn check(key: &str, declared: &D3D12_RT_FORMAT_ARRAY, bound: &[(i32, bool); 8]) {
+pub(super) fn check(
+    key: &str,
+    declared: &D3D12_RT_FORMAT_ARRAY,
+    bound: &[(i32, bool); 8],
+    draw_call: &'static str,
+    guest_shaders: &str,
+) {
     static DRAWS: AtomicU64 = AtomicU64::new(0);
     static COMPARED: AtomicU64 = AtomicU64::new(0);
     static MISMATCHES: AtomicU64 = AtomicU64::new(0);
     const LIMIT: usize = 32;
-    static SEEN: Mutex<Vec<(String, usize, i32, i32, bool)>> = Mutex::new(Vec::new());
+    type Example = (usize, i32, i32, bool, &'static str);
+    static SEEN: Mutex<Vec<(String, Example)>> = Mutex::new(Vec::new());
     static FULL: AtomicBool = AtomicBool::new(false);
 
     let (mut compared, mut count) = (0, 0);
@@ -100,13 +107,12 @@ pub(super) fn check(key: &str, declared: &D3D12_RT_FORMAT_ARRAY, bound: &[(i32, 
         }
         count += 1;
         if !FULL.load(Relaxed) {
+            let example = (slot, expected, actual, null_view, draw_call);
             let mut seen = SEEN.lock().unwrap_or_else(|e| e.into_inner());
             if seen.len() < LIMIT
-                && !seen.iter().any(|(k, s, e, a, n)| {
-                    k == key && *s == slot && *e == expected && *a == actual && *n == null_view
-                })
+                && !seen.iter().any(|(k, prior)| k == key && *prior == example)
             {
-                seen.push((key.to_owned(), slot, expected, actual, null_view));
+                seen.push((key.to_owned(), example));
                 FULL.store(seen.len() == LIMIT, Relaxed);
                 drop(seen);
                 tracing::info!(
@@ -115,6 +121,8 @@ pub(super) fn check(key: &str, declared: &D3D12_RT_FORMAT_ARRAY, bound: &[(i32, 
                     expected_dxgi = expected,
                     bound_dxgi = actual,
                     null_view,
+                    draw_call,
+                    guest_shaders,
                     "RTV format mismatch"
                 );
             }

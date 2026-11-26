@@ -3662,7 +3662,12 @@ impl State {
                     }
                     // SAFETY: an open list with everything set.
                     unsafe { l6.DispatchMesh(x.min(65_535), 1, 1) };
-                    self.drew(list, crate::pipeline::host_pipeline(self.pipeline as This));
+                    self.drew(
+                        list,
+                        crate::pipeline::host_pipeline(self.pipeline as This),
+                        #[cfg(feature = "diagnostics")]
+                        "DispatchMesh",
+                    );
                     self.mesh_scissor(list, false);
                     DRAWN.fetch_add(1, Ordering::Relaxed);
                     true
@@ -4151,7 +4156,12 @@ impl State {
                 list.list
                     .DrawInstanced(count, instances, from, first_instance)
             };
-            self.drew(list, crate::pipeline::host_pipeline(self.pipeline as This));
+            self.drew(
+                list,
+                crate::pipeline::host_pipeline(self.pipeline as This),
+                #[cfg(feature = "diagnostics")]
+                "DrawInstanced",
+            );
             DRAWN.fetch_add(1, Ordering::Relaxed);
         }
         if !ran {
@@ -4256,7 +4266,12 @@ impl State {
                 list.list
                     .DrawIndexedInstanced(indices, instances, first, base, first_instance)
             };
-            self.drew(list, crate::pipeline::host_pipeline(self.pipeline as This));
+            self.drew(
+                list,
+                crate::pipeline::host_pipeline(self.pipeline as This),
+                #[cfg(feature = "diagnostics")]
+                "DrawIndexedInstanced",
+            );
             DRAWN.fetch_add(1, Ordering::Relaxed);
         }
         if !ran {
@@ -4279,10 +4294,24 @@ impl State {
 
     /// A draw with the pipeline `p` was recorded (as [`State::buffers_written`]
     /// if its shaders can store to buffers).
-    fn drew(&mut self, list: &HostList, p: Option<&HostPipeline>) {
+    fn drew(
+        &mut self,
+        list: &HostList,
+        p: Option<&HostPipeline>,
+        #[cfg(feature = "diagnostics")] draw_call: &'static str,
+    ) {
         #[cfg(feature = "diagnostics")]
-        if let Some((key, declared)) = p.and_then(|p| p.traced_targets.as_ref()) {
-            rtv_trace::check(key, declared, &self.bound_rtv_formats);
+        if let Some(pipeline) = p
+            && let Some((key, declared)) = &pipeline.traced_targets
+        {
+            // The host pipeline already has the guest stage names and container hashes.
+            rtv_trace::check(
+                key,
+                declared,
+                &self.bound_rtv_formats,
+                draw_call,
+                &pipeline.name,
+            );
         }
         if p.is_none_or(|p| p.stages.iter().any(|stage| stage.translated().stores)) {
             self.batch = None;
@@ -4581,7 +4610,12 @@ impl State {
         if kind == DISPATCH {
             self.buffers_written();
         } else {
-            self.drew(list, Some(p));
+            self.drew(
+                list,
+                Some(p),
+                #[cfg(feature = "diagnostics")]
+                "ExecuteIndirect",
+            );
         }
         // The scratch buffer stays readable as arguments: the next draw of
         // the window reads it with no barrier, and the next clamp moves it

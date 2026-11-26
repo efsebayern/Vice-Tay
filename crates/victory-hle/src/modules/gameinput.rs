@@ -1,5 +1,6 @@
 //! `gameinput.dll`: input devices from the host. Gamepads come from XInput
-//! (host slots 0-3); while none is connected, the keyboard drives one
+//! (host slots 0-3), with PS5 HID input when XInput reports no pads or both
+//! sources are explicitly requested. With no pad the keyboard drives one
 //! stand-in gamepad (`FALLBACK_BUTTONS`). The keyboard is a device of its own
 //! too. A poll thread turns host state into readings (a new one per change)
 //! and runs device callbacks on connect and disconnect.
@@ -20,6 +21,9 @@ use std::time::{Duration, Instant};
 use super::xasync::{E_INVALIDARG, E_NOTIMPL};
 use super::xgameruntime::{HRESULT, S_OK};
 use crate::{HleExport, HleModule};
+
+#[cfg(any(windows, test))]
+mod dualsense;
 
 /// The documented errors.
 pub const DEVICE_DISCONNECTED: HRESULT = 0x838A_0001_u32 as i32;
@@ -855,7 +859,10 @@ extern "system" fn unregister_callback(this: This, token: u64, timeout: u64) -> 
             return true;
         }
         state = match deadline {
-            None => hub.returned.wait(state).unwrap_or_else(PoisonError::into_inner),
+            None => hub
+                .returned
+                .wait(state)
+                .unwrap_or_else(PoisonError::into_inner),
             Some(deadline) => {
                 let Some(left) = deadline.checked_duration_since(Instant::now()) else {
                     return false;
@@ -1115,7 +1122,8 @@ pub(crate) fn module() -> HleModule {
     }
 }
 
-/// Host input: XInput pads, the keyboard while our process has focus.
+/// Host input: XInput pads, then PS5 pads, the keyboard while our process
+/// has focus.
 #[cfg(windows)]
 mod host {
     use std::time::{Duration, Instant};
@@ -1178,10 +1186,13 @@ mod host {
     #[derive(Default)]
     pub(super) struct Host {
         empty_until: [Option<Instant>; PADS],
+        /// The input snapshot for this poll and the HID connection owning each slot.
+        pads: [Option<PadState>; PADS],
+        hid_slots: [Option<u64>; PADS],
     }
 
-    impl Source for Host {
-        fn pad(&mut self, slot: usize) -> Option<PadState> {
+    impl Host {
+        fn xinput(&mut self, slot: usize) -> Option<PadState> {
             if self.empty_until[slot].is_some_and(|until| Instant::now() < until) {
                 return None;
             }
@@ -1192,7 +1203,22 @@ mod host {
                 return None;
             }
             self.empty_until[slot] = None;
-            let mut pad = convert(&state.Gamepad);
+            Some(convert(&state.Gamepad))
+        }
+    }
+
+    impl Source for Host {
+        fn pad(&mut self, slot: usize) -> Option<PadState> {
+            if slot == 0 {
+                let xinput = std::array::from_fn(|slot| self.xinput(slot));
+                self.pads = super::dualsense::slots(
+                    super::dualsense::mode(),
+                    xinput,
+                    &mut self.hid_slots,
+                    super::dualsense::pads,
+                );
+            }
+            let mut pad = self.pads[slot]?;
             // The scripted keys (`VICTORY_KEYS_FILE` and `VICTORY_KEYS`)
             // also press the first pad's buttons, by the stand-in pad's
             // table: with a real pad connected the stand-in is not there,
@@ -1202,7 +1228,9 @@ mod host {
                 let mut asked = asked_keys();
                 asked.extend(scripted());
                 for vk in asked {
-                    if let Some(&(_, button)) = super::FALLBACK_BUTTONS.iter().find(|(key, _)| *key == vk) {
+                    if let Some(&(_, button)) =
+                        super::FALLBACK_BUTTONS.iter().find(|(key, _)| *key == vk)
+                    {
                         pad.buttons |= button;
                     }
                 }
@@ -1273,12 +1301,13 @@ mod host {
     /// camera) while someone else uses the desktop. Unset: nothing is read.
     fn asked_keys() -> Vec<u8> {
         /// The file, and the name it is taken to before it is read ([`take`]).
-        static FILE: LazyLock<Option<(std::path::PathBuf, std::path::PathBuf)>> = LazyLock::new(|| {
-            let file = std::env::var_os("VICTORY_KEYS_FILE")?;
-            let mut taken = file.clone();
-            taken.push(".taken");
-            Some((file.into(), taken.into()))
-        });
+        static FILE: LazyLock<Option<(std::path::PathBuf, std::path::PathBuf)>> =
+            LazyLock::new(|| {
+                let file = std::env::var_os("VICTORY_KEYS_FILE")?;
+                let mut taken = file.clone();
+                taken.push(".taken");
+                Some((file.into(), taken.into()))
+            });
         /// Keys held, until when; when the file was last looked at.
         type Held = (Vec<(Instant, u8)>, Option<Instant>);
         static HELD: Mutex<Held> = Mutex::new((Vec::new(), None));
@@ -1287,7 +1316,9 @@ mod host {
         };
         let now = Instant::now();
         let mut held = HELD.lock().unwrap_or_else(PoisonError::into_inner);
-        let due = held.1.is_none_or(|last| now.duration_since(last) >= Duration::from_millis(50));
+        let due = held
+            .1
+            .is_none_or(|last| now.duration_since(last) >= Duration::from_millis(50));
         if due {
             held.1 = Some(now);
             if let Some(text) = take(file, taken) {
@@ -1367,14 +1398,20 @@ mod host {
         let asked = asked("Enter 0.2\nJ 1.5\nnot a key 3\nW -1\nX\n", now);
         assert_eq!(
             asked,
-            [(now + Duration::from_millis(200), 0x0D), (now + Duration::from_millis(1500), b'J')]
+            [
+                (now + Duration::from_millis(200), 0x0D),
+                (now + Duration::from_millis(1500), b'J')
+            ]
         );
     }
 
     #[test]
     fn a_batch_written_after_the_file_is_taken_waits_for_the_next_look() {
         let dir = tempfile::tempdir().unwrap();
-        let (file, taken) = (dir.path().join("keys.txt"), dir.path().join("keys.txt.taken"));
+        let (file, taken) = (
+            dir.path().join("keys.txt"),
+            dir.path().join("keys.txt.taken"),
+        );
         assert_eq!(take(&file, &taken), None);
         std::fs::write(&file, "Enter 0.3\n").unwrap();
         assert_eq!(take(&file, &taken).as_deref(), Some("Enter 0.3\n"));
@@ -1405,6 +1442,47 @@ mod host {
             ),
             (1.0, -1.0, 1.0, 0.0)
         );
+    }
+
+    /// Hardware probe, not a check: prints what each host slot holds
+    /// whenever that changes, for `VICTORY_PROBE_SECS` (default 60), so a
+    /// pad can be unplugged, switched to Bluetooth or put behind a remapper
+    /// while it runs. `cargo test -p victory-hle probe_host_pads -- --ignored --nocapture`
+    #[test]
+    #[ignore = "needs real pads and someone to plug them"]
+    fn probe_host_pads() {
+        let secs = std::env::var("VICTORY_PROBE_SECS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(60);
+        let end = Instant::now() + Duration::from_secs(secs);
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter("victory_hle::modules::gameinput=debug")
+            .with_test_writer()
+            .try_init();
+        let mut host = Host::default();
+        let mut last = String::new();
+        let start = Instant::now();
+        while Instant::now() < end {
+            let mut line = String::new();
+            for slot in 0..PADS {
+                let xinput = host.xinput(slot).is_some();
+                let pad = host.pad(slot);
+                let from = match (pad, xinput) {
+                    (None, _) => "-",
+                    (Some(_), true) => "xinput",
+                    (Some(_), false) => "hid",
+                };
+                let pressed = pad.map(|p| p.buttons).unwrap_or(0);
+                line += &format!("[{slot}: {from} {pressed:#06x}] ");
+            }
+            line += &format!("hid pads: {}", super::dualsense::pads().len());
+            if line != last {
+                println!("{:6.1}s {line}", start.elapsed().as_secs_f32());
+                last = line;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
     }
 }
 
@@ -1680,7 +1758,11 @@ mod tests {
         assert_eq!(pad(hub).left_x, 1.0);
         // A pad is switched on, in any slot: its input arrives, beside the
         // keyboard's, and no device comes or goes.
-        host.lock().unwrap().pads[2] = Some(PadState { buttons: A, left_y: -0.5, ..Default::default() });
+        host.lock().unwrap().pads[2] = Some(PadState {
+            buttons: A,
+            left_y: -0.5,
+            ..Default::default()
+        });
         hub.poll();
         let p = pad(hub);
         assert_eq!((p.buttons, p.left_x, p.left_y), (A, 1.0, -0.5));
@@ -1751,7 +1833,16 @@ mod tests {
         let mut token = 0;
         let context = (&raw const hub.object).cast_mut().cast();
         assert_eq!(
-            register(&hub.object, std::ptr::null(), GAMEPAD_KIND, 1, 0, context, Some(slow), &mut token),
+            register(
+                &hub.object,
+                std::ptr::null(),
+                GAMEPAD_KIND,
+                1,
+                0,
+                context,
+                Some(slow),
+                &mut token
+            ),
             S_OK
         );
         host.lock().unwrap().pads[1] = Some(PadState::default());
@@ -1760,7 +1851,10 @@ mod tests {
             std::thread::sleep(Duration::from_millis(1));
         }
         let unregister = slot::<extern "system" fn(This, u64, u64) -> bool, _>(&hub.object, 0x68);
-        assert!(!unregister(&hub.object, token, 5000), "times out while it runs");
+        assert!(
+            !unregister(&hub.object, token, 5000),
+            "times out while it runs"
+        );
         let leave = std::thread::spawn(|| {
             std::thread::sleep(Duration::from_millis(50));
             LEAVE.store(true, Ordering::SeqCst);
