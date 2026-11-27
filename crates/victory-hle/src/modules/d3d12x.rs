@@ -4,6 +4,7 @@
 
 use std::ffi::c_void;
 
+pub use victory_gpu::OfflineShaderError;
 use victory_gpu::device;
 use victory_gpu::object::{HRESULT, Iid, Object};
 
@@ -39,8 +40,8 @@ fn host_gpu_failed(what: &str) -> ! {
 }
 
 /// Translates `container` into the cache ([`use_shader_cache`]) ahead of
-/// any run: whether it was there already, or why it does not translate.
-pub fn precompile(container: &[u8]) -> Result<bool, String> {
+/// any run: whether it was there already, or why it could not be saved or translated.
+pub fn precompile(container: &[u8]) -> Result<bool, OfflineShaderError> {
     #[cfg(windows)]
     {
         victory_gpu::shader_cache::precompile(container)
@@ -48,7 +49,7 @@ pub fn precompile(container: &[u8]) -> Result<bool, String> {
     #[cfg(not(windows))]
     {
         let _ = container;
-        Err("no host".into())
+        Err(OfflineShaderError::Cache("no host shader cache".into()))
     }
 }
 
@@ -66,16 +67,15 @@ pub fn stale_shaders() -> (u64, u64, u64) {
     }
 }
 
-/// The fork's offline warm-up (`victory translate --warm`), by
-/// [`precompile`]: whether it was translated now.
-pub fn warm_shader(container: &[u8]) -> Result<bool, String> {
+/// Open only the shader cache for offline precompile, with no in-memory fallback.
+pub fn prepare_shader_cache(dir: std::path::PathBuf) -> Result<(), String> {
     #[cfg(windows)]
     {
-        victory_gpu::shader_cache::precompile(container).map(|was_there| !was_there)
+        victory_gpu::shader_cache::prepare_shader_cache(dir)
     }
     #[cfg(not(windows))]
     {
-        let _ = container;
+        let _ = dir;
         Err("no shader cache on this host".into())
     }
 }

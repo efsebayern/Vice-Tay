@@ -18,6 +18,7 @@ use victory_shader::{
 use victory_shader::{io, resource};
 
 use crate::shader::{MAX_FILE, Source, scan::FileScan, sources};
+use victory_hle::modules::d3d12x::{self, OfflineShaderError};
 
 #[derive(Default)]
 struct Tally {
@@ -178,12 +179,14 @@ pub fn warm(paths: Vec<PathBuf>, file: &Path, jobs: Option<usize>, wave: Option<
     // (what is done stays in the cache; the next warm-up goes on from there).
     let limit = std::env::var("VICTORY_WARM_SECONDS").ok().and_then(|v| v.trim().parse::<u64>().ok());
     let cfg = victory_core::Config::load()?;
-    victory_hle::modules::d3d12x::use_shader_cache(cfg.cache_subdir("shaders")?);
+    d3d12x::prepare_shader_cache(cfg.cache_subdir("shaders")?)
+        .map_err(|why| anyhow::anyhow!("opening offline shader cache: {why}"))?;
     let paths = crate::default_paths(paths)?;
     let threads = jobs.unwrap_or(4).max(1);
     let began = std::time::Instant::now();
     let done = Mutex::new(HashSet::new());
     let counts = [const { AtomicUsize::new(0) }; 5];
+    let cache_errors = CacheErrors::default();
     for root in &paths {
         for entry in walkdir::WalkDir::new(root).into_iter().filter_map(Result::ok) {
             if !entry.file_type().is_file() || entry.metadata().map_or(0, |m| m.len()) > MAX_FILE {
@@ -213,10 +216,14 @@ pub fn warm(paths: Vec<PathBuf>, file: &Path, jobs: Option<usize>, wave: Option<
                             if n.is_multiple_of(1000) {
                                 println!("warm-up      {n} shaders so far, {:.0} s", began.elapsed().as_secs_f64());
                             }
-                            let which = match victory_hle::modules::d3d12x::warm_shader(&bytes) {
-                                Ok(true) => 0,
-                                Ok(false) => 1,
-                                Err(_) => 2,
+                            let which = match d3d12x::precompile(&bytes) {
+                                Ok(false) => 0,
+                                Ok(true) => 1,
+                                Err(OfflineShaderError::Translate(_)) => 2,
+                                Err(OfflineShaderError::Cache(why)) => {
+                                    cache_errors.record(why);
+                                    continue;
+                                }
                             };
                             counts[which].fetch_add(1, Ordering::Relaxed);
                         }
@@ -230,10 +237,37 @@ pub fn warm(paths: Vec<PathBuf>, file: &Path, jobs: Option<usize>, wave: Option<
     let stopped = if counts[3].load(Ordering::Relaxed) > 0 { " (stopped at the time limit)" } else { "" };
     println!(
         "warm-up      {asked} hashes asked, {} found: {translated} translated now, {there} in the cache already, {failed} do not translate; {:.1} s on {threads} threads{stopped}",
-        translated + there + failed,
+        translated + there + failed + cache_errors.count(),
         began.elapsed().as_secs_f64()
     );
-    Ok(())
+    cache_errors.finish()
+}
+
+/// A partial translation batch is useful, but a cache I/O failure must not
+/// turn a precompile into a reported success. Keep only the first I/O error.
+#[derive(Default)]
+struct CacheErrors {
+    count: AtomicUsize,
+    first: std::sync::OnceLock<String>,
+}
+
+impl CacheErrors {
+    fn record(&self, why: String) {
+        self.count.fetch_add(1, Ordering::Relaxed);
+        let _ = self.first.set(why);
+    }
+
+    fn count(&self) -> usize {
+        self.count.load(Ordering::Relaxed)
+    }
+
+    fn finish(self) -> Result<()> {
+        let count = self.count();
+        if let Some(why) = self.first.into_inner() {
+            anyhow::bail!("could not cache {count} shaders: {why}");
+        }
+        Ok(())
+    }
 }
 
 pub fn run(
@@ -412,13 +446,15 @@ pub fn run(
 /// Every shader found into the cache runs translate from.
 pub fn precompile(paths: Vec<PathBuf>, jobs: Option<usize>, list: Option<PathBuf>) -> Result<()> {
     let cfg = victory_core::Config::load()?;
-    victory_hle::modules::d3d12x::use_shader_cache(cfg.cache_subdir("shaders")?);
+    d3d12x::prepare_shader_cache(cfg.cache_subdir("shaders")?)
+        .map_err(|why| anyhow::anyhow!("opening offline shader cache: {why}"))?;
     let paths = crate::default_paths(paths)?;
     let threads =
         jobs.unwrap_or_else(|| std::thread::available_parallelism().map_or(4, |n| n.get()));
     let started = std::time::Instant::now();
     let seen = Mutex::new(HashSet::new());
     let done = AtomicUsize::new(0);
+    let cache_errors = CacheErrors::default();
     let failed = Mutex::new(BTreeMap::<String, (usize, String)>::new());
     let lines = Mutex::new(Vec::<String>::new());
     let mut scan = FileScan::new(MAX_FILE, false);
@@ -435,14 +471,22 @@ pub fn precompile(paths: Vec<PathBuf>, jobs: Option<usize>, list: Option<PathBuf
                             if !lock(&seen).insert(hash) {
                                 continue;
                             }
-                            match victory_hle::modules::d3d12x::precompile(&bytes) {
+                            match d3d12x::precompile(&bytes) {
                                 Ok(_) => {
                                     let n = done.fetch_add(1, Ordering::Relaxed) + 1;
                                     if n.is_multiple_of(1000) {
                                         println!("{n} shaders in the cache, {:.0} s", started.elapsed().as_secs_f64());
                                     }
                                 }
-                                Err(why) => {
+                                Err(OfflineShaderError::Cache(why)) => {
+                                    if list.is_some() {
+                                        let hex = hash.to_hex()[..16].to_owned();
+                                        let line = format!("{hex}\t{}{}\tcache: {why}", path.display(), job.label());
+                                        lock(&lines).push(line);
+                                    }
+                                    cache_errors.record(why);
+                                }
+                                Err(OfflineShaderError::Translate(why)) => {
                                     let hex = hash.to_hex()[..16].to_owned();
                                     if list.is_some() {
                                         let line = format!("{hex}	{}{}	{why}", path.display(), job.label());
@@ -487,7 +531,7 @@ pub fn precompile(paths: Vec<PathBuf>, jobs: Option<usize>, list: Option<PathBuf
         println!("  {n:>5}  {why}  (e.g. {hash})");
     }
     println!("{scan}");
-    Ok(())
+    cache_errors.finish()
 }
 
 fn translate(

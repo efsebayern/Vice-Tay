@@ -96,6 +96,14 @@ mod safecopy;
 mod sampler;
 #[cfg(windows)]
 pub mod shader_cache;
+
+/// An offline shader could not be translated or could not be kept on disk.
+#[derive(Debug, PartialEq, Eq)]
+pub enum OfflineShaderError {
+    Translate(String),
+    Cache(String),
+}
+
 #[cfg(windows)]
 mod memory;
 #[cfg(windows)]
