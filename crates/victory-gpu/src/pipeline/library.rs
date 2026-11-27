@@ -1,12 +1,13 @@
 //! Compiled host pipelines kept on disk, and the title pipelines worth
 //! starting early (decision 0007, "Pipeline cache").
 //!
-//! 1. Every host pipeline goes into the host's pipeline library, named by
+//! 1. Eligible host pipelines go into the host's pipeline library, named by
 //!    a hash of all that its host description holds (the translated
 //!    shaders' code, which changes when a translation does, our root
 //!    signature, the graphics state). The library is saved under the cache
 //!    folder; the host refuses a library of another adapter or driver, and
-//!    an entry whose description differs, so neither is ever used.
+//!    an entry whose description differs, so neither is ever used. NVIDIA
+//!    pipelines with static samplers use the driver's own cache instead.
 //! 2. The title pipelines a run drew or dispatched with are listed by a key
 //!    known when the title creates them (their shader containers and
 //!    graphics state); the next run hands those to the workers at
@@ -534,7 +535,7 @@ pub(crate) fn name(kind: &str, root: &[u8], code: &[&[u8]], state: &str) -> Stri
 /// The pipeline named `name`: loaded from the library by `load` if it is
 /// there with the same description, else made by `create` and stored.
 pub(crate) fn pipeline(
-    name: &str,
+    name: Option<&str>,
     load: impl FnOnce(&ID3D12PipelineLibrary1, PCWSTR) -> windows::core::Result<ID3D12PipelineState>,
     create: impl FnOnce() -> windows::core::Result<ID3D12PipelineState>,
 ) -> windows::core::Result<ID3D12PipelineState> {
@@ -542,11 +543,11 @@ pub(crate) fn pipeline(
         let _creating = crate::timeline::span("pipeline: create a PSO in the driver");
         create()
     };
-    let wide = HSTRING::from(name);
-    let Some(library) = library() else {
+    let Some((name, library)) = name.and_then(|name| library().map(|library| (name, library))) else {
         MADE.fetch_add(1, Ordering::Relaxed);
         return create();
     };
+    let wide = HSTRING::from(name);
     let began = std::time::Instant::now();
     let loaded = {
         let mut loading = crate::timeline::span("pipeline: acquire library load guards");
@@ -594,6 +595,19 @@ pub(crate) fn pipeline(
         library.added.fetch_add(1, Ordering::Relaxed);
     }
     Ok(pso)
+}
+
+/// The NVIDIA driver can restore a pipeline with static sampler indices from
+/// the process that stored it. When the next process creates samplers in a
+/// different order, the pipeline can pick the wrong filter or address mode.
+/// `VICTORY_LIBRARY_STATIC_SAMPLERS=1` enables library reuse for comparison.
+pub(super) fn allows_static_samplers(host: &crate::host::Host) -> bool {
+    const NVIDIA: u32 = 0x10DE;
+    static ALLOWED: OnceLock<bool> = OnceLock::new();
+    *ALLOWED.get_or_init(|| {
+        host.adapter_vendor_id() != Some(NVIDIA)
+            || std::env::var_os("VICTORY_LIBRARY_STATIC_SAMPLERS").is_some_and(|value| value == "1")
+    })
 }
 
 /// Writes the library and the early list if pipelines were added since the
@@ -827,6 +841,21 @@ pub(crate) fn note_used(key: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bypassing_the_library_calls_pipeline_creation() {
+        let created = std::cell::Cell::new(false);
+        let result = pipeline(
+            None,
+            |_, _| panic!("loaded a pipeline without a library name"),
+            || {
+                created.set(true);
+                Err(windows::core::Error::empty())
+            },
+        );
+        assert!(created.get());
+        assert!(result.is_err());
+    }
 
     #[test]
     fn names_change_with_what_goes_into_the_pipeline() {

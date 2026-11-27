@@ -135,16 +135,11 @@ fn build() -> [u8; 32] {
             }
             bytes.push(0);
         }
-        // The list affects output only with the explicit global opt-in.
-        if std::env::var_os("VICTORY_WAVE_WIDE").is_some_and(|v| v == "1")
-            && let Some(list) = std::env::var_os("VICTORY_WAVE_WIDE_ONLY").filter(|v| !v.is_empty())
-        {
-            bytes.extend_from_slice(b"VICTORY_WAVE_WIDE_ONLY=");
-            bytes.extend_from_slice(list.as_encoded_bytes());
-            bytes.push(0);
-        }
         // And which clean-up passes ran over the translated code.
         bytes.extend_from_slice(&victory_shader::emit::shader_opt().to_le_bytes());
+        if victory_shader::emit::early_depth_enabled() {
+            bytes.extend_from_slice(b"VICTORY_EARLY_DEPTH=1\0");
+        }
         // Renderer port 5 (`VICTORY_PORT_CBV=1`): constant buffers read as raw
         // bytes. Only when on, so the translations cached without it keep
         // their key.
@@ -166,70 +161,6 @@ pub(crate) fn translation() -> [u8; 32] {
     build()
 }
 
-/// The hashes of `value`, and the words that are none (`none` aside).
-fn parse_wave_wide_words(value: &str) -> (Vec<u64>, Vec<&str>) {
-    let mut list = Vec::new();
-    let mut ignored = Vec::new();
-    for word in value.split(|c: char| c == ',' || c.is_ascii_whitespace()).filter(|w| !w.is_empty()) {
-        match u64::from_str_radix(word, 16) {
-            Ok(hash) if word.len() == 16 && word.bytes().all(|b| b.is_ascii_hexdigit()) => list.push(hash),
-            _ if word.eq_ignore_ascii_case("none") => {}
-            _ => ignored.push(word),
-        }
-    }
-    list.sort_unstable();
-    list.dedup();
-    (list, ignored)
-}
-
-#[cfg(test)]
-fn parse_wave_wide_list(value: &str) -> Vec<u64> {
-    parse_wave_wide_words(value).0
-}
-
-fn on_wave_wide_list(list: &[u64], container: &[u8]) -> bool {
-    !list.is_empty()
-        && list
-            .binary_search(&u64::from_be_bytes(*blake3::hash(container).as_bytes().first_chunk::<8>().unwrap()))
-            .is_ok()
-}
-
-/// The 16-digit container hashes named by `VICTORY_WAVE_WIDE_ONLY`.
-/// The global switch has precedence, including an explicit opt-out.
-fn wave_wide_selected(container: &[u8]) -> bool {
-    static LIST: OnceLock<Vec<u64>> = OnceLock::new();
-    let list = LIST.get_or_init(|| {
-        let Ok(value) = std::env::var("VICTORY_WAVE_WIDE_ONLY") else {
-            return Vec::new();
-        };
-        if std::env::var_os("VICTORY_WAVE_WIDE").is_some() {
-            tracing::info!("VICTORY_WAVE_WIDE is set: VICTORY_WAVE_WIDE_ONLY is not used");
-            return Vec::new();
-        }
-        let (list, ignored) = parse_wave_wide_words(&value);
-        if !ignored.is_empty() {
-            // A shortened or mistyped hash would otherwise leave its
-            // program without the wave-wide form, silently.
-            tracing::warn!(?ignored, "VICTORY_WAVE_WIDE_ONLY: not 16-digit shader hashes, left out");
-        }
-        tracing::info!(programs = list.len(), "VICTORY_WAVE_WIDE_ONLY: wave-wide form for the listed programs only");
-        list
-    });
-    on_wave_wide_list(list, container)
-}
-
-fn shader_build(mut build: [u8; 32], allow_wide: bool) -> [u8; 32] {
-    if allow_wide {
-        // Only selected containers need a new key. Driver pipeline names
-        // already include the translated bytecode.
-        let mut hash = blake3::Hasher::new();
-        hash.update(&build);
-        hash.update(b"VICTORY_WAVE_WIDE_ONLY=1");
-        build = *hash.finalize().as_bytes();
-    }
-    build
-}
-
 /// Puts the translation of `container` into the cache before any title asks
 /// for it (`victory shaders`): whether it was there already, or why it does
 /// not translate. The host is opened first, as a run does: what the card
@@ -237,7 +168,11 @@ fn shader_build(mut build: [u8; 32], allow_wide: bool) -> [u8; 32] {
 pub fn precompile(container: &[u8]) -> Result<bool, String> {
     let _ = crate::host::host();
     let misses = MISSES.load(Ordering::Relaxed);
-    translate_cached(container, true)?;
+    let translate = |c: &[u8]| victory_shader::emit::translate(c).map_err(|e| e.to_string());
+    match CACHE.get() {
+        Some(cache) => cached(cache, &build(), container, translate, true)?,
+        None => translate(container)?,
+    };
     // (Counts other threads' misses too: the caller only adds them up.)
     Ok(MISSES.load(Ordering::Relaxed) == misses)
 }
@@ -245,14 +180,9 @@ pub fn precompile(container: &[u8]) -> Result<bool, String> {
 /// The translation of a console shader container, from the cache when
 /// there is one.
 pub(crate) fn host_shader(container: &[u8]) -> Result<HostShader, String> {
-    translate_cached(container, refresh_in_runs())
-}
-
-fn translate_cached(container: &[u8], refresh: bool) -> Result<HostShader, String> {
-    let allow_wide = wave_wide_selected(container);
-    let translate = |c: &[u8]| victory_shader::emit::translate_with_wave_wide(c, allow_wide).map_err(|e| e.to_string());
+    let translate = |c: &[u8]| victory_shader::emit::translate(c).map_err(|e| e.to_string());
     match CACHE.get() {
-        Some(cache) => cached(cache, &shader_build(build(), allow_wide), container, translate, refresh),
+        Some(cache) => cached(cache, &build(), container, translate, refresh_in_runs()),
         None => translate(container),
     }
 }
@@ -293,7 +223,16 @@ fn cached(
     translate: impl Fn(&[u8]) -> Result<HostShader, String> + Send + Sync,
     refresh: bool,
 ) -> Result<HostShader, String> {
-    cached_by(cache, build, SOURCE, container, translate, refresh)
+    let per_shader_build = victory_shader::emit::wave_wide_cache_override(container)
+        .map_or(*build, |enabled| {
+            *blake3::Hasher::new()
+                .update(build)
+                .update(b"wave-wide-shader-v1\0")
+                .update(&[u8::from(enabled)])
+                .finalize()
+                .as_bytes()
+        });
+    cached_by(cache, &per_shader_build, SOURCE, container, translate, refresh)
 }
 
 /// [`cached`] with the build of the translator given (`source`).
@@ -544,33 +483,6 @@ fn decode(bytes: &[u8]) -> Option<(HostShader, Vec<u8>)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn wave_wide_list_matches_full_logged_hashes_only() {
-        let selected = b"synthetic selected shader";
-        let hash = blake3::hash(selected).to_hex()[..16].to_ascii_uppercase();
-        let list = parse_wave_wide_list(&format!("none, invalid, {}, {hash}", &hash[..8]));
-        assert_eq!(list.len(), 1);
-        assert!(on_wave_wide_list(&list, selected));
-        assert!(!on_wave_wide_list(&list, b"synthetic unselected shader"));
-        assert!(!on_wave_wide_list(&parse_wave_wide_list("none"), selected));
-    }
-
-    #[test]
-    fn wave_wide_list_names_what_it_leaves_out() {
-        let (list, ignored) =
-            parse_wave_wide_words("6f225b641c5b0708, none,6F225B641C5B0708 +f225b641c5b0708 6f225b64 xyz");
-        assert_eq!(list, [0x6f22_5b64_1c5b_0708]);
-        assert_eq!(ignored, ["+f225b641c5b0708", "6f225b64", "xyz"]);
-    }
-
-    #[test]
-    fn wave_wide_changes_only_the_selected_shader_cache_key() {
-        let build = [42u8; 32];
-        let list = parse_wave_wide_list(&blake3::hash(b"selected").to_hex()[..16]);
-        assert_eq!(shader_build(build, on_wave_wide_list(&list, b"unselected")), build);
-        assert_ne!(shader_build(build, on_wave_wide_list(&list, b"selected")), build);
-    }
 
     fn shader() -> HostShader {
         HostShader {
