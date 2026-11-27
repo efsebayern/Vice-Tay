@@ -1203,9 +1203,12 @@ pub(super) fn shut_down() {
             return;
         }
     }
+    tracing::info!("DLSS: waiting for submitted work before NGX shutdown");
     victory_gpu::external::finish_submitted();
     let parameters = ngx.parameters.lock().unwrap_or_else(|e| e.into_inner());
+    tracing::info!("DLSS: draining pending NGX features");
     release_pending(ngx, &parameters);
+    tracing::info!("DLSS: calling NGX Shutdown1");
     // SAFETY: NGX was started on this device; nothing of it is used after.
     let result = unsafe { (ngx.shutdown)(ngx.device.as_raw()) };
     NGX_GONE.store(true, Ordering::Release);

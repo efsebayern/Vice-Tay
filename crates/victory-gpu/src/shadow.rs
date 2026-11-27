@@ -2252,6 +2252,7 @@ fn workers() -> &'static Workers {
         for i in 0..workers.thread_count {
             let _ = std::thread::Builder::new().name(format!("victory-wide-{i}")).spawn(move || {
                 crate::cores::keep_helper_on_fast_cores("victory-wide");
+                let mut priority = crate::cores::Priority::new();
                 let workers = WORKERS.get().expect("made above");
                 loop {
                     let job = {
@@ -2267,6 +2268,7 @@ fn workers() -> &'static Workers {
                             jobs = workers.more.wait(jobs).unwrap_or_else(|e| e.into_inner());
                         }
                     };
+                    priority.keep();
                     let _working = crate::timeline::span("a job for another thread");
                     job();
                 }
