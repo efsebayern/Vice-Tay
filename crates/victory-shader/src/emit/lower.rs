@@ -4612,7 +4612,18 @@ impl<'a> Lower<'a> {
             let quiet = self.s.m.i32(0x7FC0_0000);
             self.s.m.cmp(c, pred::EQ, abs, quiet)
         };
-        let inf = self.s.m.cmp(c, pred::EQ, abs, inf_bits);
+        // `VICTORY_NAN_GUARD=clamp`: on colour targets every magnitude past the largest
+        // half, not only infinities, so a 16-bit or R11G11B10 float target is not written
+        // an infinity by the host's conversion (the next pass makes NaN of it, which this
+        // guard then turns black: the sun's disc and its glints on the water).
+        // shortcut: an R32 float target is clamped too; it holds nothing past 65504 in the
+        // passes seen so far.
+        let inf = if strict && nan_guard_clamps() {
+            let largest = self.s.m.i32(65504f32.to_bits());
+            self.s.m.cmp(c, pred::IUGT, abs, largest)
+        } else {
+            self.s.m.cmp(c, pred::EQ, abs, inf_bits)
+        };
         let sign_bit = self.s.m.i32(0x8000_0000);
         let sign = self.s.m.bin(c, Bin::And, bits, sign_bit);
         let big = self.s.m.i32(65504f32.to_bits());
@@ -13671,6 +13682,13 @@ fn interp_mode(kind: Barycentric) -> Option<u8> {
         Barycentric::LinearSample => 7,
         Barycentric::PerspectivePullModel => return None,
     })
+}
+
+
+/// `VICTORY_NAN_GUARD=clamp` ([`Lower::nan_guard`]).
+fn nan_guard_clamps() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("VICTORY_NAN_GUARD").is_ok_and(|v| v.eq_ignore_ascii_case("clamp")))
 }
 
 #[cfg(test)]

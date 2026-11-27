@@ -40,6 +40,9 @@ $settings = @{
     VICTORY_JOIN_COPIES = '1'; VICTORY_INDIRECT_WINDOW = '1'; VICTORY_RELAY_COPY = '1'; VICTORY_CARD_STEPS = '2'
     VICTORY_TITLE_PRIORITIES = '0'
     VICTORY_SHOW_AFTER = '1'; VICTORY_AMBIENT = '0.8'; VICTORY_D3D12_DRED = 'light'
+    # Colour targets get nothing past the largest half: the sun's disc and its
+    # glints on the water rendered black without it (run rt-clamp, RTX 4080 SUPER).
+    VICTORY_NAN_GUARD = 'clamp'
 }
 $ram = (Get-CimInstance Win32_ComputerSystem -ErrorAction SilentlyContinue).TotalPhysicalMemory
 $controllers = @(if ($Machine -in 'auto', '7900xtx') {
@@ -47,8 +50,12 @@ $controllers = @(if ($Machine -in 'auto', '7900xtx') {
 })
 $hasNvidia = [bool]($controllers.PNPDeviceID -match 'VEN_10DE')
 if ($Machine -eq 'auto') {
-    # Use the existing vendor defaults. The 4070 / 7800X3D profile is explicit.
-    $Machine = if ($hasNvidia) { '4090' } else { '7900xtx' }
+    # An NVIDIA card gets the 4090's settings on a PC the size of the 4090 test
+    # PC, the 4070's on one with less than 40 GB of RAM: on an RTX 4080 SUPER
+    # with an i7-13700K and 32 GB, Series S cutscene, 3 minutes each, the 4070
+    # profile ran 16.2 fps with ray tracing where the 4090's ran 10.2, and
+    # 20.3 without where it ran 17.0. Other cards get the 7900 XTX's.
+    $Machine = if (-not $hasNvidia) { '7900xtx' } elseif ($ram -and $ram -lt 40GB) { '4070' } else { '4090' }
 }
 if ($Machine -eq '7900xtx') {
     # i9-12900K, RX 7900 XTX, 64 GB: the page-mapping lock was fastest with one
@@ -83,6 +90,10 @@ if ($Machine -eq '7900xtx') {
         # taken (submit thread 104.7 -> 50.9 ms a frame, 12.1 -> 14.3 fps here).
         $settings.VICTORY_PLACED_ORDER = '1'
     }
+    # The four wave64 programs of the 32-lane list are the translator's default
+    # now. a10179ab7eda0dc3 (a compute program, 14 branches wave-wide) is added
+    # here and not yet through a 30-minute run: if the card is lost, try without it.
+    $settings.VICTORY_WAVE_WIDE_ONLY = 'a10179ab7eda0dc3'
 }
 if ($Machine -eq '4070') {
     # Ryzen 7 7800X3D: eight physical cores, versus the 4090 test PC's sixteen.
