@@ -675,6 +675,37 @@ pub(super) fn start(
     // VICTORY_DLSS_REACTIVE=0: the title's reactive mask stays out of DLSS,
     // for an A/B (values made for FSR may keep aliasing DLSS would smooth).
     let reactive = !std::env::var("VICTORY_DLSS_REACTIVE").is_ok_and(|v| v == "0");
+    // The feature folder, searched before NGX's defaults.
+    let feature_dir = dir
+        .map(std::path::absolute)
+        .transpose()
+        .map_err(|e| e.to_string())?;
+    // Without an application copy of the DLL, NGX's own (the driver's, or
+    // one its updater fetched) has crashed inside `Init_ProjectID` itself
+    // (access violation in `_nvngx.dll`, drivers 610.88 and 617.42, #176),
+    // where no result can be checked. So DLSS starts only with a copy in
+    // the feature folder or beside the executable, unless
+    // VICTORY_DLSS_TRUST_NGX=1 asks for NGX's own anyway.
+    let trust_ngx = std::env::var("VICTORY_DLSS_TRUST_NGX").is_ok_and(|v| v == "1");
+    if !trust_ngx {
+        let exe = std::env::current_exe().ok();
+        let beside_exe = exe.as_deref().and_then(Path::parent);
+        if app_snippet(feature_dir.as_deref(), beside_exe).is_none() {
+            return Err(format!(
+                "no {DLL} in the DLSS folder ({}) or beside the executable; NGX's own copy has crashed \
+                 inside NVSDK_NGX_D3D12_Init_ProjectID on some drivers. Point VICTORY_DLSS_DIR (or \
+                 [paths].dlss_dir) at a folder with NVIDIA's {DLL}, or set VICTORY_DLSS_TRUST_NGX=1 to \
+                 try NGX's own copy",
+                feature_dir.as_ref().map_or_else(|| "not set".to_owned(), |d| d.display().to_string()),
+            ));
+        }
+    }
+    if let Some(dir) = &feature_dir
+        && !dir.join(DLL).is_file()
+    {
+        tracing::warn!(folder = %dir.display(), "DLSS: no {DLL} there; NGX uses another copy");
+    }
+
     // VICTORY_DLSS_NO_UPDATE=1: NGX neither starts its updater nor prefers
     // a model it downloaded, so the run uses the DLL from the feature
     // folder. The core reads `__NGX_DISABLE_UPDATER` (not in the SDK's
@@ -734,16 +765,6 @@ pub(super) fn start(
     };
     let device = victory_gpu::external::host_device().ok_or("there is no host GPU")?;
 
-    // The feature folder, searched before NGX's defaults.
-    let feature_dir = dir
-        .map(std::path::absolute)
-        .transpose()
-        .map_err(|e| e.to_string())?;
-    if let Some(dir) = &feature_dir
-        && !dir.join(DLL).is_file()
-    {
-        tracing::warn!(folder = %dir.display(), "DLSS: no {DLL} there; NGX uses another copy");
-    }
     std::fs::create_dir_all(logs).map_err(|e| format!("{}: {e}", logs.display()))?;
     let logs = std::path::absolute(logs).map_err(|e| e.to_string())?;
     let data: &'static mut InitData = Box::leak(Box::new(InitData {
@@ -863,6 +884,16 @@ impl std::fmt::Display for Snippet {
         let version = self.version.as_deref().unwrap_or("of an unknown version");
         write!(f, "DLSS {version} from {}", self.path.display())
     }
+}
+
+/// The application copy of the DLSS DLL NGX would load first: in the
+/// feature folder, else beside the executable.
+fn app_snippet(feature_dir: Option<&Path>, beside_exe: Option<&Path>) -> Option<PathBuf> {
+    feature_dir
+        .into_iter()
+        .chain(beside_exe)
+        .map(|dir| dir.join(DLL))
+        .find(|path| path.is_file())
 }
 
 /// Whether a module of this path is a DLSS Super Resolution DLL: the one an
@@ -1760,6 +1791,31 @@ fn evaluate(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn application_snippet_prefers_the_configured_folder() {
+        let tmp = tempfile::tempdir().unwrap();
+        let feature = tmp.path().join("feature");
+        let executable = tmp.path().join("app");
+        std::fs::create_dir(&feature).unwrap();
+        std::fs::create_dir(&executable).unwrap();
+
+        assert_eq!(app_snippet(Some(&feature), Some(&executable)), None);
+
+        let beside_exe = executable.join(DLL);
+        std::fs::write(&beside_exe, b"fixture").unwrap();
+        assert_eq!(
+            app_snippet(Some(&feature), Some(&executable)),
+            Some(beside_exe)
+        );
+
+        let configured = feature.join(DLL);
+        std::fs::write(&configured, b"fixture").unwrap();
+        assert_eq!(
+            app_snippet(Some(&feature), Some(&executable)),
+            Some(configured)
+        );
+    }
     use crate::modules::fidelityfx::Resource;
 
     #[test]

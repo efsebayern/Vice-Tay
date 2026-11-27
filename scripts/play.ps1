@@ -165,8 +165,16 @@ if ($ram -and $ram -lt 60GB) {
 }
 
 $victory = Join-Path $PSScriptRoot "..\target\$Build\victory.exe"
-if (-not (Test-Path $victory)) { Write-Host "No $victory. Build it first (README.md)."; exit 1 }
+if (-not (Test-Path -LiteralPath $victory -PathType Leaf)) { Write-Host "No $victory. Build it first (README.md)."; exit 1 }
 if (-not (Test-Path -LiteralPath $Exe -PathType Leaf)) { Write-Host "No $Exe."; exit 1 }
+$victory = (Resolve-Path -LiteralPath $victory).Path
+Write-Host "Vice-Tay executable $victory"
+try {
+    $checksum = Get-FileHash -LiteralPath $victory -Algorithm SHA256 -ErrorAction Stop
+    Write-Host "Vice-Tay SHA-256 $($checksum.Hash)"
+} catch {
+    Write-Warning "Could not read the Vice-Tay executable checksum: $($_.Exception.Message)"
+}
 # (Other settings left over in this window go; where your files are stays.)
 $paths = 'VICTORY_CONFIG', 'VICTORY_GAME_DIR', 'VICTORY_CACHE_DIR', 'VICTORY_DATA_DIR', 'VICTORY_FIDELITYFX_DIR', 'VICTORY_FFX_FG_DIR', 'VICTORY_DLSS_DIR'
 $inherited = @(Get-ChildItem Env:VICTORY_* | Where-Object { $_.Name -notin $paths })

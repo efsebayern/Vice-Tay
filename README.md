@@ -92,10 +92,12 @@ For FSR, point `VICTORY_FIDELITYFX_DIR` or `[paths].fidelityfx_dir` at the
 folder containing `amd_fidelityfx_upscaler_dx12.dll`. The 4K mode prefers
 FSR 4.1.2 and uses 3.1.6 when that is what the adapter supports. Series S
 uses FSR 3.1.6. Both profiles can use FSR when DLSS fails.
-For DLSS on an RTX card, set `VICTORY_DLSS_DIR` or `[paths].dlss_dir` to
-select a folder with `nvngx_dlss.dll`. NGX uses the driver's copy by
-default. `VICTORY_DLSS_NO_UPDATE=1` uses the installed selection without
-an NGX update. [AMD FSR SDK](https://gpuopen.com/amd-fsr-sdk/) ·
+For DLSS on an RTX card, get `nvngx_dlss.dll` from the NVIDIA DLSS SDK.
+Set `VICTORY_DLSS_DIR` or `[paths].dlss_dir` to its folder, or put the DLL
+beside `victory.exe`. Some drivers ship without this library. Vice-Tay
+checks for it before initializing NGX and uses the configured FSR
+fallback when it is missing. `VICTORY_DLSS_NO_UPDATE=1` uses the installed
+selection without an NGX update. [AMD FSR SDK](https://gpuopen.com/amd-fsr-sdk/) ·
 [NVIDIA DLSS SDK](https://github.com/NVIDIA/DLSS)
 
 For 2× Series S frame generation, pass `-FrameGen`. Point
