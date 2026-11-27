@@ -38,6 +38,9 @@ pub fn run(jobs: Option<usize>, limit: Option<usize>, again: bool, used: bool, t
     let began = Instant::now();
     victory_hle::known_pipelines::use_translations(dir.with_file_name("shaders"));
     let fingerprint = known::fingerprint();
+    // Earlier entries did not distinguish a successful creation from a refusal.
+    // Retry that history once; only this marker certifies a created pipeline.
+    let success_key = format!("made-v1:{fingerprint}");
     let done_file = dir.join("warm-done.txt");
     let bad_file = dir.join("warm-bad.txt");
     let entries = known::warm_entries(&dir);
@@ -45,7 +48,7 @@ pub fn run(jobs: Option<usize>, limit: Option<usize>, again: bool, used: bool, t
     let mut done: HashSet<&str> = HashSet::new();
     for line in listed.lines() {
         if let Some((of, key)) = line.split_once(' ')
-            && of == fingerprint
+            && of == success_key
         {
             done.insert(key);
         }
@@ -95,7 +98,12 @@ pub fn run(jobs: Option<usize>, limit: Option<usize>, again: bool, used: bool, t
                 println!("{count} of {}, {:.0} s", all.len(), began.elapsed().as_secs_f64());
             }
             drop(state);
-            writeln!(lock(&done_out), "{fingerprint} {}", entries[n].key).context("writing warm-done.txt")
+            // A recipe can be missing a shader or the driver can refuse it.
+            // Neither case warmed a pipeline. Leave it eligible next time.
+            if there {
+                writeln!(lock(&done_out), "{success_key} {}", entries[n].key).context("writing warm-done.txt")?;
+            }
+            Ok(())
         },
         |n, why| {
             println!("pipeline {n} {}: {why}", entries[n].key);
@@ -108,8 +116,8 @@ pub fn run(jobs: Option<usize>, limit: Option<usize>, again: bool, used: bool, t
     times.sort_by(f64::total_cmp);
     let at = |q: f64| times.get((times.len() as f64 * q) as usize).copied().unwrap_or(0.0);
     println!(
-        "{} made in {:.0} s ({refused} have no host pipeline, {crashed} ended their process); ms each: median {:.1}, p90 {:.1}, p99 {:.1}, most {:.0}, sum {:.0} s",
-        times.len(),
+        "{} made in {:.0} s ({refused} have no host pipeline, {crashed} ended their process); ms per completed attempt: median {:.1}, p90 {:.1}, p99 {:.1}, most {:.0}, sum {:.0} s",
+        times.len() - refused,
         began.elapsed().as_secs_f64(),
         at(0.5),
         at(0.9),
